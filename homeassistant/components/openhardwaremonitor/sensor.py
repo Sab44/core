@@ -12,7 +12,7 @@ from homeassistant.components.sensor import (
     PLATFORM_SCHEMA as SENSOR_PLATFORM_SCHEMA,
     SensorEntity,
 )
-from homeassistant.const import CONF_HOST, CONF_PORT
+from homeassistant.const import CONF_HOST, CONF_PORT, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import PlatformNotReady
 import homeassistant.helpers.config_validation as cv
@@ -29,8 +29,7 @@ STATE_VALUE = "value"
 STATE_OBJECT = "object"
 CONF_INTERVAL = "interval"
 
-MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=15)
-SCAN_INTERVAL = timedelta(seconds=30)
+MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=1)
 RETRY_INTERVAL = timedelta(seconds=30)
 
 OHM_VALUE = "Value"
@@ -40,7 +39,15 @@ OHM_CHILDREN = "Children"
 OHM_NAME = "Text"
 
 PLATFORM_SCHEMA = SENSOR_PLATFORM_SCHEMA.extend(
-    {vol.Required(CONF_HOST): cv.string, vol.Optional(CONF_PORT, default=8085): cv.port}
+    {
+        vol.Required(CONF_HOST): cv.string,
+        vol.Optional(CONF_PORT, default=8085): cv.port,
+        vol.Optional(CONF_SCAN_INTERVAL, default=30): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=3, max=300),
+            lambda value: timedelta(seconds=value),
+        ),
+    }
 )
 
 
