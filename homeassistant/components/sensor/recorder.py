@@ -282,6 +282,7 @@ def _normalize_states(
     state_unit: str | None = None
     statistics_unit: str | None
     state_unit = fstates[-1][1].attributes.get(ATTR_UNIT_OF_MEASUREMENT)
+    all_units = _get_units(fstates)
     device_class = fstates[-1][1].attributes.get(ATTR_DEVICE_CLASS)
     old_metadata = old_metadatas[entity_id][1] if entity_id in old_metadatas else None
     if not old_metadata:
@@ -307,7 +308,6 @@ def _normalize_states(
     if not (converter := _get_unit_converter(unit_class)):
         # The unit used by this sensor doesn't support unit conversion
 
-        all_units = _get_units(fstates)
         if not _equivalent_units(all_units):
             if WARN_UNSTABLE_UNIT not in hass.data:
                 hass.data[WARN_UNSTABLE_UNIT] = set()
@@ -339,32 +339,36 @@ def _normalize_states(
             )
         return unit_class, state_unit, fstates
 
+    valid_units = converter.VALID_UNITS
+
+    if any(unit not in valid_units for unit in all_units):
+        # Potential unit migration, drop states with unexpected units once
+        states_by_unit: list[list[tuple[float, State]]] = [
+            list(states)
+            for _, states in itertools.groupby(
+                fstates, key=lambda x: x[1].attributes.get(ATTR_UNIT_OF_MEASUREMENT)
+            )
+        ]
+
+        if SEEN_CHANGED_UNIT not in hass.data:
+            hass.data[SEEN_CHANGED_UNIT] = set()
+
+        if (
+            len(states_by_unit) == 2
+            and state_unit == statistics_unit
+            and entity_id not in hass.data[SEEN_CHANGED_UNIT]
+        ):
+            hass.data[SEEN_CHANGED_UNIT].add(entity_id)
+            fstates = states_by_unit[1]
+
     valid_fstates: list[tuple[float, State]] = []
     convert: Callable[[float], float] | None = None
     last_unit: str | None | UndefinedType = UNDEFINED
-    valid_units = converter.VALID_UNITS
-    is_unit_migration: bool = False
-    states_by_unit: list[list[tuple[float, State]]] = [
-        list(states)
-        for _, states in itertools.groupby(
-            fstates, key=lambda x: x[1].attributes.get(ATTR_UNIT_OF_MEASUREMENT)
-        )
-    ]
 
     for fstate, state in fstates:
         state_unit = state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
         # Exclude states with unsupported unit from statistics
         if state_unit not in valid_units:
-            if SEEN_CHANGED_UNIT not in hass.data:
-                hass.data[SEEN_CHANGED_UNIT] = set()
-
-            if (
-                len(states_by_unit) == 2
-                and entity_id not in hass.data[SEEN_CHANGED_UNIT]
-            ):
-                is_unit_migration = True
-                continue
-
             if WARN_UNSUPPORTED_UNIT not in hass.data:
                 hass.data[WARN_UNSUPPORTED_UNIT] = set()
             if entity_id not in hass.data[WARN_UNSUPPORTED_UNIT]:
@@ -397,9 +401,6 @@ def _normalize_states(
             fstate = convert(fstate)
 
         valid_fstates.append((fstate, state))
-
-    if is_unit_migration:
-        hass.data[SEEN_CHANGED_UNIT].add(entity_id)
 
     return unit_class, statistics_unit, valid_fstates
 
