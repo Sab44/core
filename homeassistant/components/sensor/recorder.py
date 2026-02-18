@@ -304,29 +304,11 @@ def _normalize_states(
             # and the unit in the state, so we can use the new unit class
             unit_class = new_unit_class
 
-    states_by_unit = [
-        list(state)
-        for _, state in itertools.groupby(
-            fstates, key=lambda x: x[1].attributes.get(ATTR_UNIT_OF_MEASUREMENT)
-        )
-    ]
-
     if not (converter := _get_unit_converter(unit_class)):
         # The unit used by this sensor doesn't support unit conversion
 
         all_units = _get_units(fstates)
         if not _equivalent_units(all_units):
-            if SEEN_CHANGED_UNIT not in hass.data:
-                hass.data[SEEN_CHANGED_UNIT] = set()
-
-            if (
-                len(states_by_unit) == 2
-                and state_unit == statistics_unit
-                and entity_id not in hass.data[SEEN_CHANGED_UNIT]
-            ):
-                hass.data[SEEN_CHANGED_UNIT].add(entity_id)
-                return unit_class, state_unit, states_by_unit[1]
-
             if WARN_UNSTABLE_UNIT not in hass.data:
                 hass.data[WARN_UNSTABLE_UNIT] = set()
             if entity_id not in hass.data[WARN_UNSTABLE_UNIT]:
@@ -362,6 +344,12 @@ def _normalize_states(
     last_unit: str | None | UndefinedType = UNDEFINED
     valid_units = converter.VALID_UNITS
     is_unit_migration: bool = False
+    states_by_unit: list[list[tuple[float, State]]] = [
+        list(states)
+        for _, states in itertools.groupby(
+            fstates, key=lambda x: x[1].attributes.get(ATTR_UNIT_OF_MEASUREMENT)
+        )
+    ]
 
     for fstate, state in fstates:
         state_unit = state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
