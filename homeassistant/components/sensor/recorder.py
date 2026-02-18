@@ -94,6 +94,8 @@ WARN_NEGATIVE: HassKey[set[str]] = HassKey(f"{DOMAIN}_warn_total_increasing_nega
 # Keep track of entities for which a warning about unsupported unit has been logged
 WARN_UNSUPPORTED_UNIT: HassKey[set[str]] = HassKey(f"{DOMAIN}_warn_unsupported_unit")
 WARN_UNSTABLE_UNIT: HassKey[set[str]] = HassKey(f"{DOMAIN}_warn_unstable_unit")
+# Keep track of entities for which a change in unit has been observed
+SEEN_CHANGED_UNIT: HassKey[set[str]] = HassKey(f"{DOMAIN}_seen_changed_unit")
 # Keep track of entities for which a warning about statistics mean algorithm change has been logged
 WARN_STATISTICS_MEAN_CHANGED: HassKey[set[str]] = HassKey(
     f"{DOMAIN}_warn_statistics_mean_change"
@@ -279,11 +281,11 @@ def _normalize_states(
     """Normalize units."""
     state_unit: str | None = None
     statistics_unit: str | None
-    state_unit = fstates[0][1].attributes.get(ATTR_UNIT_OF_MEASUREMENT)
-    device_class = fstates[0][1].attributes.get(ATTR_DEVICE_CLASS)
+    state_unit = fstates[-1][1].attributes.get(ATTR_UNIT_OF_MEASUREMENT)
+    device_class = fstates[-1][1].attributes.get(ATTR_DEVICE_CLASS)
     old_metadata = old_metadatas[entity_id][1] if entity_id in old_metadatas else None
     if not old_metadata:
-        # We've not seen this sensor before, the first valid state determines the unit
+        # We've not seen this sensor before, the most recent valid state determines the unit
         # used for statistics
         statistics_unit = state_unit
         unit_class = _get_unit_class(device_class, state_unit)
@@ -302,11 +304,29 @@ def _normalize_states(
             # and the unit in the state, so we can use the new unit class
             unit_class = new_unit_class
 
+    states_by_unit = [
+        list(state)
+        for _, state in itertools.groupby(
+            fstates, key=lambda x: x[1].attributes.get(ATTR_UNIT_OF_MEASUREMENT)
+        )
+    ]
+
     if not (converter := _get_unit_converter(unit_class)):
         # The unit used by this sensor doesn't support unit conversion
 
         all_units = _get_units(fstates)
         if not _equivalent_units(all_units):
+            if SEEN_CHANGED_UNIT not in hass.data:
+                hass.data[SEEN_CHANGED_UNIT] = set()
+
+            if (
+                len(states_by_unit) == 2
+                and state_unit == statistics_unit
+                and entity_id not in hass.data[SEEN_CHANGED_UNIT]
+            ):
+                hass.data[SEEN_CHANGED_UNIT].add(entity_id)
+                return unit_class, state_unit, states_by_unit[1]
+
             if WARN_UNSTABLE_UNIT not in hass.data:
                 hass.data[WARN_UNSTABLE_UNIT] = set()
             if entity_id not in hass.data[WARN_UNSTABLE_UNIT]:
@@ -332,7 +352,7 @@ def _normalize_states(
 
         if state_unit != statistics_unit:
             unit_class = _get_unit_class(
-                fstates[0][1].attributes.get(ATTR_DEVICE_CLASS),
+                fstates[-1][1].attributes.get(ATTR_DEVICE_CLASS),
                 state_unit,
             )
         return unit_class, state_unit, fstates
@@ -341,11 +361,22 @@ def _normalize_states(
     convert: Callable[[float], float] | None = None
     last_unit: str | None | UndefinedType = UNDEFINED
     valid_units = converter.VALID_UNITS
+    is_unit_migration: bool = False
 
     for fstate, state in fstates:
         state_unit = state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
         # Exclude states with unsupported unit from statistics
         if state_unit not in valid_units:
+            if SEEN_CHANGED_UNIT not in hass.data:
+                hass.data[SEEN_CHANGED_UNIT] = set()
+
+            if (
+                len(states_by_unit) == 2
+                and entity_id not in hass.data[SEEN_CHANGED_UNIT]
+            ):
+                is_unit_migration = True
+                continue
+
             if WARN_UNSUPPORTED_UNIT not in hass.data:
                 hass.data[WARN_UNSUPPORTED_UNIT] = set()
             if entity_id not in hass.data[WARN_UNSUPPORTED_UNIT]:
@@ -378,6 +409,9 @@ def _normalize_states(
             fstate = convert(fstate)
 
         valid_fstates.append((fstate, state))
+
+    if is_unit_migration:
+        hass.data[SEEN_CHANGED_UNIT].add(entity_id)
 
     return unit_class, statistics_unit, valid_fstates
 
