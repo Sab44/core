@@ -342,7 +342,6 @@ def _normalize_states(
     valid_units = converter.VALID_UNITS
 
     if any(unit not in valid_units for unit in all_units):
-        # Potential unit migration, drop states with unexpected units once
         states_by_unit: list[list[tuple[float, State]]] = [
             list(states)
             for _, states in itertools.groupby(
@@ -358,17 +357,11 @@ def _normalize_states(
             and state_unit == statistics_unit
             and entity_id not in hass.data[SEEN_CHANGED_UNIT]
         ):
+            # Potential unit migration, silently drop states with unexpected units once
             hass.data[SEEN_CHANGED_UNIT].add(entity_id)
             fstates = states_by_unit[1]
-
-    valid_fstates: list[tuple[float, State]] = []
-    convert: Callable[[float], float] | None = None
-    last_unit: str | None | UndefinedType = UNDEFINED
-
-    for fstate, state in fstates:
-        state_unit = state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
-        # Exclude states with unsupported unit from statistics
-        if state_unit not in valid_units:
+        else:
+            # Exclude states with unsupported unit from statistics
             if WARN_UNSUPPORTED_UNIT not in hass.data:
                 hass.data[WARN_UNSUPPORTED_UNIT] = set()
             if entity_id not in hass.data[WARN_UNSUPPORTED_UNIT]:
@@ -386,8 +379,18 @@ def _normalize_states(
                     statistics_unit,
                     LINK_DEV_STATISTICS,
                 )
-            continue
+                fstates = [
+                    (fstate, state)
+                    for fstate, state in fstates
+                    if state.attributes.get(ATTR_UNIT_OF_MEASUREMENT) in valid_units
+                ]
 
+    valid_fstates: list[tuple[float, State]] = []
+    convert: Callable[[float], float] | None = None
+    last_unit: str | None | UndefinedType = UNDEFINED
+
+    for fstate, state in fstates:
+        state_unit = state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
         if state_unit != last_unit:
             # The unit of measurement has changed since the last state change
             # recreate the converter factory
