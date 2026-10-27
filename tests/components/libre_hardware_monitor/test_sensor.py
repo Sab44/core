@@ -1091,3 +1091,167 @@ async def test_new_identical_device_does_not_take_replaced_entity_id(
         )
         == f"{entity_id}_2"
     )
+
+
+SPARE_LEVEL_DEVICE = ("nvme-0", "Samsung SSD 990 EVO Plus 2TB")
+
+
+async def _async_setup_with_registered_replacement(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    mock_lhm_client: AsyncMock,
+    mock_config_entry: MockConfigEntry,
+) -> tuple[er.RegistryEntry, er.RegistryEntry]:
+    """Register a renamed sensor next to the one it replaces, as older versions did.
+
+    Returns the registry entries of the replaced and the replacing sensor, with the
+    integration unloaded and LHM reporting the replacing sensor only.
+    """
+    initial_data = mock_lhm_client.get_data.return_value.sensor_data
+    old_sensor = _sensor(
+        "nvme-0-level-100", "Available Spare Level", *SPARE_LEVEL_DEVICE
+    )
+    _set_sensor_data(
+        mock_lhm_client, {**initial_data, old_sensor.sensor_id: old_sensor}
+    )
+    await init_integration(hass, mock_config_entry)
+    await hass.config_entries.async_unload(mock_config_entry.entry_id)
+
+    replaced_entry = entity_registry.async_get(
+        entity_registry.async_get_entity_id(
+            "sensor", DOMAIN, f"{mock_config_entry.entry_id}_{old_sensor.sensor_id}"
+        )
+    )
+    assert replaced_entry
+    replacing_entry = entity_registry.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        f"{mock_config_entry.entry_id}_nvme-0-level-25",
+        config_entry=mock_config_entry,
+        device_id=replaced_entry.device_id,
+        has_entity_name=True,
+        object_id_base=replaced_entry.original_name,
+        original_name=replaced_entry.original_name,
+    )
+    assert replacing_entry.entity_id == f"{replaced_entry.entity_id}_2"
+
+    new_sensor = _sensor(
+        "nvme-0-level-25", "Available Spare Level", *SPARE_LEVEL_DEVICE
+    )
+    _set_sensor_data(
+        mock_lhm_client, {**initial_data, new_sensor.sensor_id: new_sensor}
+    )
+    return replaced_entry, replacing_entry
+
+
+async def test_registered_replacement_takes_over_replaced_entry(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    mock_lhm_client: AsyncMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Test a replacement registered by an older version gets the original entity id."""
+    replaced_entry, replacing_entry = await _async_setup_with_registered_replacement(
+        hass, entity_registry, mock_lhm_client, mock_config_entry
+    )
+
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    # the replaced entry, and with it the user's settings, now belongs to the new sensor
+    entry = entity_registry.async_get(replaced_entry.entity_id)
+    assert entry
+    assert entry.id == replaced_entry.id
+    assert entry.unique_id == replacing_entry.unique_id
+    assert entity_registry.async_get(replacing_entry.entity_id) is None
+    assert hass.states.get(replaced_entry.entity_id).state == "42.0"
+
+
+async def test_registered_replacement_keeps_user_chosen_entity_id(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    mock_lhm_client: AsyncMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Test a replacement whose entity id the user changed is left alone."""
+    replaced_entry, replacing_entry = await _async_setup_with_registered_replacement(
+        hass, entity_registry, mock_lhm_client, mock_config_entry
+    )
+    entity_registry.async_update_entity(
+        replacing_entry.entity_id, new_entity_id="sensor.ssd_spare_level"
+    )
+
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entity_registry.async_get(replaced_entry.entity_id) is None
+    entry = entity_registry.async_get("sensor.ssd_spare_level")
+    assert entry
+    assert entry.id == replacing_entry.id
+
+
+async def test_registered_replacement_kept_if_user_deleted_replaced_entry(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    mock_lhm_client: AsyncMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Test nothing is reconciled once the user deleted the replaced entity."""
+    replaced_entry, replacing_entry = await _async_setup_with_registered_replacement(
+        hass, entity_registry, mock_lhm_client, mock_config_entry
+    )
+    entity_registry.async_remove(replaced_entry.entity_id)
+
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    entry = entity_registry.async_get(replacing_entry.entity_id)
+    assert entry
+    assert entry.id == replacing_entry.id
+    assert entity_registry.async_get(replaced_entry.entity_id) is None
+
+
+async def test_running_replaced_sensor_is_not_handed_over(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    mock_lhm_client: AsyncMock,
+    mock_config_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Test the entry of a running sensor is not handed over to its replacement."""
+    initial_data = mock_lhm_client.get_data.return_value.sensor_data
+    old_sensor = _sensor(
+        "nvme-0-level-100", "Available Spare Level", *SPARE_LEVEL_DEVICE
+    )
+    _set_sensor_data(
+        mock_lhm_client, {**initial_data, old_sensor.sensor_id: old_sensor}
+    )
+    await init_integration(hass, mock_config_entry)
+
+    replaced_entry = entity_registry.async_get(
+        entity_registry.async_get_entity_id(
+            "sensor", DOMAIN, f"{mock_config_entry.entry_id}_{old_sensor.sensor_id}"
+        )
+    )
+    assert replaced_entry
+    replacing_entry = entity_registry.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        f"{mock_config_entry.entry_id}_nvme-0-level-25",
+        config_entry=mock_config_entry,
+        device_id=replaced_entry.device_id,
+        has_entity_name=True,
+        object_id_base=replaced_entry.original_name,
+        original_name=replaced_entry.original_name,
+    )
+
+    new_sensor = _sensor(
+        "nvme-0-level-25", "Available Spare Level", *SPARE_LEVEL_DEVICE
+    )
+    _set_sensor_data(
+        mock_lhm_client, {**initial_data, new_sensor.sensor_id: new_sensor}
+    )
+    await _async_poll(hass, freezer)
+
+    assert entity_registry.async_get(replaced_entry.entity_id) is None
+    assert hass.states.get(replacing_entry.entity_id).state == "42.0"

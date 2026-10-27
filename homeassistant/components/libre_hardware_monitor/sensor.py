@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 import logging
+import re
 from typing import Any, override
 
 from librehardwaremonitor_api.model import LibreHardwareMonitorSensorData
@@ -9,6 +10,7 @@ from librehardwaremonitor_api.sensor_type import SensorType
 
 from homeassistant.components.sensor import (
     AMBIGUOUS_UNITS,
+    DOMAIN as SENSOR_DOMAIN,
     UNIT_CONVERTERS,
     SensorDeviceClass,
     SensorEntity,
@@ -78,11 +80,11 @@ async def async_setup_entry(
         entity_registry.async_remove(entity_id)
 
     @callback
-    def _async_remove_replaced_sensor(
+    def _async_replace_sensor(
         sensor_data: Mapping[str, LibreHardwareMonitorSensorData],
         new_sensor: LibreHardwareMonitorSensorData,
     ) -> str | None:
-        """Remove the sensor a new sensor id replaces and return its entity id.
+        """Retire the sensor a new sensor id replaces and return its entity id.
 
         LHM updates can change sensor ids, e.g. when a sensor moves to another
         index. The replaced sensor has the same name on the same device and is no
@@ -107,11 +109,30 @@ async def async_setup_entry(
                 continue
 
             _LOGGER.debug(
-                "Sensor %s replaces %s, removing it",
-                new_sensor.sensor_id,
-                replaced_sensor_id,
+                "Sensor %s replaces %s", new_sensor.sensor_id, replaced_sensor_id
             )
-            _async_remove_sensor(replaced_sensor_id, registry_entry.entity_id)
+            new_unique_id = f"{unique_id_prefix}{new_sensor.sensor_id}"
+            registered_entity_id = entity_registry.async_get_entity_id(
+                SENSOR_DOMAIN, DOMAIN, new_unique_id
+            )
+            if (
+                registered_entity_id
+                # A running entity would keep the entry's entity id
+                and replaced_sensor_id not in added_sensor_ids
+                and re.fullmatch(
+                    rf"{re.escape(registry_entry.entity_id)}_\d+", registered_entity_id
+                )
+            ):
+                # Registered next to the replaced sensor by an older version that
+                # didn't replace sensors. A pinned entity id only applies to new
+                # entries, so hand the replaced entry over to the new sensor.
+                missing_from_updates.pop(replaced_sensor_id, None)
+                entity_registry.async_remove(registered_entity_id)
+                entity_registry.async_update_entity(
+                    registry_entry.entity_id, new_unique_id=new_unique_id
+                )
+            else:
+                _async_remove_sensor(replaced_sensor_id, registry_entry.entity_id)
             return registry_entry.entity_id
 
         return None
@@ -133,7 +154,7 @@ async def async_setup_entry(
                 entity = LibreHardwareMonitorSensor(
                     lhm_coordinator, config_entry.entry_id, sensor_data[sensor_id]
                 )
-                if replaced_entity_id := _async_remove_replaced_sensor(
+                if replaced_entity_id := _async_replace_sensor(
                     sensor_data, sensor_data[sensor_id]
                 ):
                     # Pin entity id as identical devices have same-named sensors,
